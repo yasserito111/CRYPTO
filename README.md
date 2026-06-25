@@ -209,7 +209,7 @@ Move:
 
 ```text
 CRYPTO/test_shpe.c
-CRYPTO/test_phpe.c
+CRYPTO/test_phpe_128.c
 ```
 
 to:
@@ -246,7 +246,7 @@ export LD_LIBRARY_PATH=~/relic/build/lib:$LD_LIBRARY_PATH
 ./demo/general-paillier/test_shpe
 ```
 
-For PHPE, replace `shpe` with `phpe`.
+For PHPE, replace `shpe` with `phpe_128`.
 
 ---
 
