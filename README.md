@@ -148,7 +148,7 @@ set (TESTS_LIST
                 test_Paillier
                 test_Joye_Libert
                 test_ec
-                test_CL_HSMqk_128
+                test_CL_HSMqk_128 #this line is added you can add your tests here 
                 test_threshold_ECDSA
                 test_twoPartyECDSA
                 test_internals
