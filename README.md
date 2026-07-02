@@ -348,6 +348,261 @@ clang++-16 FPSUServer_dimension_N.cpp \
 
 ---
 
+## 6. SimplePIR Integration
+
+This section explains how to integrate **SimplePIR** into the `volepsi` project through a Go/C++ bridge (`bridge.go`), then build and run the demo.
+
+### 6.1 Clone SimplePIR
+
+From the project directory:
+
+```bash
+cd volepsi
+git clone https://github.com/ahenzinger/simplepir.git
+cd simplepir
+```
+
+The SimplePIR repository exposes the Go package `pir`, which provides the primitives used in `bridge.go` [page:1].
+
+### 6.2 Create `bridge.go`
+
+Create the file:
+
+```bash
+nano bridge.go
+```
+
+Then paste the following content:
+
+```go
+package main
+
+import "C"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/ahenzinger/simplepir/pir"
+)
+
+type serverRuntime struct {
+	id      int
+	db      *pir.Database
+	params  pir.Params
+	shared  pir.State
+	server  pir.State
+	offline pir.Msg
+	answer  pir.Msg
+}
+
+var (
+	mu            sync.Mutex
+	servers       = make(map[int]*serverRuntime)
+	clientState   pir.State
+	clientShared  pir.State
+	clientQuery   pir.Msg
+	queryParams   pir.Params
+	queryIndex    uint64
+	server1Answer pir.Msg
+	server2Answer pir.Msg
+	lastRecovered uint64
+)
+
+//export GlobalInitPIR
+func GlobalInitPIR() {
+	fmt.Println("[Go] SimplePIR initialized successfully.")
+}
+
+func makeDatabase(size uint64) (*pir.Database, pir.Params) {
+	pi := &pir.SimplePIR{}
+	params := pi.PickParams(size, 1, 4, 32)
+
+	vals := make([]uint64, 0, size)
+	for i := uint64(0); i < size; i++ {
+		vals = append(vals, i+1)
+	}
+
+	db := pir.MakeDB(size, 1, &params, vals)
+	return db, params
+}
+
+//export PIRServerSetup
+func PIRServerSetup(serverId int, size uint64) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if size == 0 {
+		size = 8
+	}
+
+	db, params := makeDatabase(size)
+	pi := &pir.SimplePIR{}
+	shared := pi.Init(db.Info, params)
+	serverState, offline := pi.Setup(db, shared, params)
+
+	servers[serverId] = &serverRuntime{
+		id:      serverId,
+		db:      db,
+		params:  params,
+		shared:  shared,
+		server:  serverState,
+		offline: offline,
+	}
+
+	fmt.Printf("[Go] [Server %d] PIR database built: %d entries, params L=%d M=%d P=%d.\n",
+		serverId, size, params.L, params.M, params.P)
+}
+
+//export PIRClientQuery
+func PIRClientQuery(targetIndex int) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s1, ok := servers[3]
+	if !ok {
+		fmt.Println("[Go] [Client] No initialized server available to generate the query.")
+		return
+	}
+
+	pi := &pir.SimplePIR{}
+	clientStateLocal, query := pi.Query(uint64(targetIndex), s1.shared, s1.params, s1.db.Info)
+	clientState = clientStateLocal
+	clientShared = s1.shared
+	clientQuery = query
+	queryParams = s1.params
+	queryIndex = uint64(targetIndex)
+
+	fmt.Printf("[Go] [Client] PIR query generated for index %d.\n", targetIndex)
+}
+
+//export PIRServerAnswer
+func PIRServerAnswer(serverId int) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s, ok := servers[serverId]
+	if !ok {
+		fmt.Printf("[Go] [Server %d] not initialized.\n", serverId)
+		return
+	}
+	if len(clientQuery.Data) == 0 {
+		fmt.Println("[Go] [Server] No client query available.")
+		return
+	}
+
+	pi := &pir.SimplePIR{}
+	querySlice := pir.MsgSlice{Data: []pir.Msg{clientQuery}}
+	answer := pi.Answer(s.db, querySlice, s.server, s.shared, s.params)
+
+	if serverId == 1 {
+		server1Answer = answer
+	} else if serverId == 2 {
+		server2Answer = answer
+	}
+
+	fmt.Printf("[Go] [Server %d] PIR answer computed.\n", serverId)
+}
+
+//export PIRClientExtract
+func PIRClientExtract() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s1, ok := servers[3]
+	if !ok {
+		fmt.Println("[Go] [Client] Cannot reconstruct without server 1.")
+		return
+	}
+	if len(server1Answer.Data) == 0 {
+		fmt.Println("[Go] [Client] No server response available for reconstruction.")
+		return
+	}
+
+	pi := &pir.SimplePIR{}
+	recovered := pi.Recover(queryIndex, 0, s1.offline, clientQuery, server1Answer, clientShared, clientState, queryParams, s1.db.Info)
+	lastRecovered = recovered
+
+	fmt.Printf("[Go] [Client] Recovered value: %d.\n", recovered)
+}
+
+func main() {}
+```
+
+The code follows the public SimplePIR API exposed by the `pir` package [page:1].
+
+### 6.3 Build SimplePIR as a shared library
+
+Inside the `simplepir` directory:
+
+```bash
+go mod tidy
+go build -buildmode=c-shared -o libsimplepir.so
+```
+
+This produces:
+
+- `libsimplepir.so`
+- `libsimplepir.h`
+
+The Go toolchain supports `-buildmode=c-shared` to generate a C-compatible shared library with exported symbols [web:17][web:18].
+
+### 6.4 Copy the generated files
+
+Copy the generated artifacts to the project root or to the place expected by your build:
+
+```bash
+cp libsimplepir.so ..
+cp libsimplepir.h ..
+```
+
+Or:
+
+```bash
+cd ..
+cp simplepir/libsimplepir.so .
+cp simplepir/libsimplepir.h .
+```
+
+### 6.5 Build `volepsi`
+
+If `volepsi` is not built yet, compile it first:
+
+```bash
+cd volepsi
+python3 build.py
+```
+
+The `volepsi` repository documents building the library and notes that the output library is produced under `out/build/<platform>/` or under the install prefix when using `--install` [web:3].
+
+### 6.6 Compile `pir_demo`
+
+Then compile and link the demo with `volePSI` and `SimplePIR`:
+
+```bash
+clang++-16 pir_demo.cpp -std=c++20 -maes -mpclmul -mavx2 \
+  -I. -I./out/install/linux/include -I./volePSI -I$HOME/bicycl/src \
+  -L./build/volePSI -L./out/install/linux/lib -o pir_demo \
+  -Wl,--start-group -lvolePSI -llibOTe -lbitpolymul -lcoproto -lmacoro \
+  -lcryptoTools -lsodium -lgmp -lgmpxx -lssl -lcrypto -lpthread \
+  -Wl,--end-group -L. -lsimplepir
+```
+
+Then run:
+
+```bash
+./pir_demo
+```
+
+### 6.7 Notes on linking
+
+If your linker cannot find `libsimplepir.so`, make sure the library path is visible at runtime, for example:
+
+```bash
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
+```
+
+You can also place `libsimplepir.so` in a standard library directory or adjust the rpath during linking [web:17][web:18].
+
 
 # Common Error
 
