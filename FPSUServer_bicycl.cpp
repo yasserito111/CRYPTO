@@ -14,8 +14,8 @@
 
 using namespace osuCrypto;
 
-constexpr size_t kMaxValueBytes = 4096;
-constexpr size_t kMaxValueBlocks = kMaxValueBytes / sizeof(block);
+constexpr size_t kMaxValueBlocks = 38;
+constexpr size_t kMaxValueBytes = kMaxValueBlocks * sizeof(block);
 using ValueType = std::array<block, kMaxValueBlocks>;
 
 namespace osuCrypto {
@@ -57,6 +57,14 @@ std::ostream& operator<<(std::ostream& os, const ValueType& v) {
     return os;
 }
 
+static void debug_mpz(const char* label, const BICYCL::Mpz& value) {
+    std::vector<unsigned char> bytes = static_cast<std::vector<unsigned char>>(value);
+    std::cout << "[debug] " << label
+              << " nbits=" << value.nbits()
+              << " abs_bytes=" << bytes.size()
+              << " sign=" << value.sgn() << "\n";
+}
+
 // --------------------------------------------------
 // Vérifie si un ValueType est tout à zéro
 // --------------------------------------------------
@@ -70,38 +78,43 @@ bool is_zero_valuetype(const ValueType& v) {
 // Sérialisation compacte CipherText <-> ValueType
 // --------------------------------------------------
 namespace {
-    void append_u32(std::vector<unsigned char>& out, std::uint32_t v) {
-        out.push_back(static_cast<unsigned char>((v >> 24) & 0xff));
-        out.push_back(static_cast<unsigned char>((v >> 16) & 0xff));
+    void append_u16(std::vector<unsigned char>& out, std::uint16_t v) {
         out.push_back(static_cast<unsigned char>((v >> 8) & 0xff));
         out.push_back(static_cast<unsigned char>(v & 0xff));
     }
 
-    std::uint32_t read_u32(const std::vector<unsigned char>& data, size_t& offset) {
-        if (offset + 4 > data.size()) {
+    std::uint16_t read_u16(const std::vector<unsigned char>& data, size_t& offset) {
+        if (offset + 2 > data.size()) {
             throw std::runtime_error("Invalid serialized payload length");
         }
-        std::uint32_t value = 0;
-        value |= static_cast<std::uint32_t>(data[offset++]) << 24;
-        value |= static_cast<std::uint32_t>(data[offset++]) << 16;
-        value |= static_cast<std::uint32_t>(data[offset++]) << 8;
-        value |= static_cast<std::uint32_t>(data[offset++]);
+        std::uint16_t value = 0;
+        value |= static_cast<std::uint16_t>(data[offset++]) << 8;
+        value |= static_cast<std::uint16_t>(data[offset++]);
         return value;
     }
 
     std::vector<unsigned char> encode_mpz(const BICYCL::Mpz& value) {
-        std::vector<unsigned char> abs_bytes = static_cast<std::vector<unsigned char>>(value);
+        const int sign = value.sgn();
+        const size_t nbits = value.nbits();
+        const size_t nbytes = (nbits + 7u) / 8u + (sign == 0 ? 0u : 0u);
         std::vector<unsigned char> out;
-        out.reserve(1 + 4 + abs_bytes.size());
-        if (value.sgn() < 0) {
+        out.reserve(1 + 4 + nbytes);
+
+        if (sign < 0) {
             out.push_back(0x01);
-        } else if (value.sgn() > 0) {
+        } else if (sign > 0) {
             out.push_back(0x00);
         } else {
             out.push_back(0x02);
         }
-        append_u32(out, static_cast<std::uint32_t>(abs_bytes.size()));
-        out.insert(out.end(), abs_bytes.begin(), abs_bytes.end());
+
+        append_u16(out, static_cast<std::uint16_t>(nbytes));
+
+        if (sign != 0) {
+            std::vector<unsigned char> abs_bytes(nbytes);
+            mpz_export(abs_bytes.data(), nullptr, 1, 1, 0, 0, static_cast<mpz_srcptr>(value));
+            out.insert(out.end(), abs_bytes.begin(), abs_bytes.end());
+        }
         return out;
     }
 
@@ -110,7 +123,7 @@ namespace {
             throw std::runtime_error("Unexpected end of serialized ciphertext");
         }
         const unsigned char marker = data[offset++];
-        const std::uint32_t len = read_u32(data, offset);
+        const std::uint16_t len = read_u16(data, offset);
         if (offset + len > data.size()) {
             throw std::runtime_error("Serialized coefficient is truncated");
         }
@@ -156,8 +169,9 @@ void ciphertext_to_valuetype(const BICYCL::CL_HSMqk::CipherText& ct, ValueType& 
     payload.insert(payload.end(), c1_bytes.begin(), c1_bytes.end());
     payload.insert(payload.end(), c2_bytes.begin(), c2_bytes.end());
 
+    std::cout << "[debug] ciphertext payload bytes=" << payload.size() << "\n";
     std::fill(out.begin(), out.end(), ZeroBlock);
-    std::uint32_t payload_len = static_cast<std::uint32_t>(payload.size());
+    std::uint16_t payload_len = static_cast<std::uint16_t>(payload.size());
     const size_t header_size = sizeof(payload_len);
     if (header_size + payload.size() > kMaxValueBytes) {
         throw std::runtime_error("Serialized ciphertext is larger than the fixed ValueType capacity");
@@ -177,7 +191,7 @@ BICYCL::CL_HSMqk::CipherText valuetype_to_ciphertext(
         throw std::runtime_error("ValueType is too small for serialization");
     }
 
-    std::uint32_t payload_len = 0;
+    std::uint16_t payload_len = 0;
     std::memcpy(&payload_len, raw, sizeof(payload_len));
     if (payload_len > bytes_capacity - sizeof(payload_len)) {
         throw std::runtime_error("Serialized ciphertext is larger than the ValueType buffer");
@@ -199,7 +213,7 @@ int main()
         // 1. Init BICYCL
         BICYCL::RandGen randgen;
         BICYCL::Mpz q;
-        q = (unsigned long)65537;
+        q = std::string("57896044618658097711785492504343953926634992332820282019728792003956564820063");
 
         size_t k = 1;
         size_t DeltaK_nbits = 1024;
@@ -237,6 +251,9 @@ int main()
                 m2_mpz = BICYCL::Mpz(0ul);
             else
                 BICYCL::Mpz::sub(m2_mpz, q, m1_mpz);
+
+            debug_mpz("m1_mpz", m1_mpz);
+            debug_mpz("m2_mpz", m2_mpz);
 
             BICYCL::CL_HSMqk::ClearText m1(crypto_system, m1_mpz);
             BICYCL::CL_HSMqk::ClearText m2(crypto_system, m2_mpz);
