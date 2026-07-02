@@ -454,10 +454,12 @@ libsimplepir.h
 
 ## Compile with SimplePIR
 
-Example using `FPSUServer.cpp`:
-
+Example using `pir_demo.cpp`:
+```
+copy pir_demo to /volepsi
+```
 ```bash
-clang++-16 FPSUServer.cpp \
+clang++-16 pir_demo.cpp \
     -std=c++20 \
     -maes -mpclmul -mavx2 \
     -I. \
@@ -475,7 +477,7 @@ clang++-16 FPSUServer.cpp \
     -lbitpolymul \
     -lsodium \
     -lpthread \
-    -o FPSUServer
+    -o pir_demo
 ```
 
 ## Runtime Configuration
@@ -493,7 +495,7 @@ export LD_LIBRARY_PATH=~/volepsi:$LD_LIBRARY_PATH
 Run:
 
 ```bash
-./FPSUServer
+./pir_demo
 ```
 
 The same procedure applies to:
