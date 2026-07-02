@@ -1,4 +1,3 @@
-#include "volePSI/Paxos.h"
 #include "cryptoTools/Common/Defines.h"
 #include "cryptoTools/Crypto/PRNG.h"
 #include <bicycl.hpp>
@@ -10,10 +9,22 @@
 #include <array>
 #include <sstream>
 #include <cstring>
+#include <cstdint>
+#include <algorithm>
 
 using namespace osuCrypto;
 
-using ValueType = std::array<block, 37>;
+constexpr size_t kMaxValueBytes = 4096;
+constexpr size_t kMaxValueBlocks = kMaxValueBytes / sizeof(block);
+using ValueType = std::array<block, kMaxValueBlocks>;
+
+namespace osuCrypto {
+    using ValueTypeAlias = ::ValueType;
+    ValueTypeAlias operator^(const ValueTypeAlias& a, const ValueTypeAlias& b);
+    ValueTypeAlias operator&(const ValueTypeAlias& a, const ValueTypeAlias& b);
+}
+
+#include "volePSI/Paxos.h"
 
 // --------------------------------------------------
 // Opérateurs requis par Paxos sur ValueType
@@ -21,20 +32,20 @@ using ValueType = std::array<block, 37>;
 namespace osuCrypto {
     ValueType operator^(const ValueType& a, const ValueType& b) {
         ValueType result;
-        for (size_t i = 0; i < 37; ++i)
+        for (size_t i = 0; i < result.size(); ++i)
             result[i] = a[i] ^ b[i];
         return result;
     }
 
     ValueType& operator^=(ValueType& a, const ValueType& b) {
-        for (size_t i = 0; i < 37; ++i)
+        for (size_t i = 0; i < a.size(); ++i)
             a[i] = a[i] ^ b[i];
         return a;
     }
 
     ValueType operator&(const ValueType& a, const ValueType& b) {
         ValueType result;
-        for (size_t i = 0; i < 37; ++i)
+        for (size_t i = 0; i < result.size(); ++i)
             result[i] = a[i] & b[i];
         return result;
     }
@@ -56,55 +67,127 @@ bool is_zero_valuetype(const ValueType& v) {
 }
 
 // --------------------------------------------------
-// Sérialisation QFI <-> string
+// Sérialisation compacte CipherText <-> ValueType
 // --------------------------------------------------
-std::string qfi_to_string(const BICYCL::QFI& qfi) {
-    std::ostringstream ss;
-    ss << qfi.a() << " " << qfi.b() << " " << qfi.c();
-    return ss.str();
+namespace {
+    void append_u32(std::vector<unsigned char>& out, std::uint32_t v) {
+        out.push_back(static_cast<unsigned char>((v >> 24) & 0xff));
+        out.push_back(static_cast<unsigned char>((v >> 16) & 0xff));
+        out.push_back(static_cast<unsigned char>((v >> 8) & 0xff));
+        out.push_back(static_cast<unsigned char>(v & 0xff));
+    }
+
+    std::uint32_t read_u32(const std::vector<unsigned char>& data, size_t& offset) {
+        if (offset + 4 > data.size()) {
+            throw std::runtime_error("Invalid serialized payload length");
+        }
+        std::uint32_t value = 0;
+        value |= static_cast<std::uint32_t>(data[offset++]) << 24;
+        value |= static_cast<std::uint32_t>(data[offset++]) << 16;
+        value |= static_cast<std::uint32_t>(data[offset++]) << 8;
+        value |= static_cast<std::uint32_t>(data[offset++]);
+        return value;
+    }
+
+    std::vector<unsigned char> encode_mpz(const BICYCL::Mpz& value) {
+        std::vector<unsigned char> abs_bytes = static_cast<std::vector<unsigned char>>(value);
+        std::vector<unsigned char> out;
+        out.reserve(1 + 4 + abs_bytes.size());
+        if (value.sgn() < 0) {
+            out.push_back(0x01);
+        } else if (value.sgn() > 0) {
+            out.push_back(0x00);
+        } else {
+            out.push_back(0x02);
+        }
+        append_u32(out, static_cast<std::uint32_t>(abs_bytes.size()));
+        out.insert(out.end(), abs_bytes.begin(), abs_bytes.end());
+        return out;
+    }
+
+    BICYCL::Mpz decode_mpz(const std::vector<unsigned char>& data, size_t& offset) {
+        if (offset >= data.size()) {
+            throw std::runtime_error("Unexpected end of serialized ciphertext");
+        }
+        const unsigned char marker = data[offset++];
+        const std::uint32_t len = read_u32(data, offset);
+        if (offset + len > data.size()) {
+            throw std::runtime_error("Serialized coefficient is truncated");
+        }
+
+        std::vector<unsigned char> bytes(data.begin() + offset, data.begin() + offset + len);
+        offset += len;
+
+        if (marker == 0x02) {
+            return BICYCL::Mpz(0ul);
+        }
+
+        BICYCL::Mpz value(bytes);
+        if (marker == 0x01) {
+            value.neg();
+        }
+        return value;
+    }
+
+    std::vector<unsigned char> encode_qfi(const BICYCL::QFI& qfi) {
+        std::vector<unsigned char> out;
+        std::vector<unsigned char> a_bytes = encode_mpz(qfi.a());
+        std::vector<unsigned char> b_bytes = encode_mpz(qfi.b());
+        std::vector<unsigned char> c_bytes = encode_mpz(qfi.c());
+        out.insert(out.end(), a_bytes.begin(), a_bytes.end());
+        out.insert(out.end(), b_bytes.begin(), b_bytes.end());
+        out.insert(out.end(), c_bytes.begin(), c_bytes.end());
+        return out;
+    }
+
+    BICYCL::QFI decode_qfi(const std::vector<unsigned char>& data, size_t& offset) {
+        BICYCL::Mpz a = decode_mpz(data, offset);
+        BICYCL::Mpz b = decode_mpz(data, offset);
+        BICYCL::Mpz c = decode_mpz(data, offset);
+        return BICYCL::QFI(a, b, c);
+    }
 }
 
-BICYCL::QFI string_to_qfi(const std::string& str) {
-    std::istringstream ss(str);
-    std::string a_str, b_str, c_str;
-    ss >> a_str >> b_str >> c_str;
-    BICYCL::Mpz a(a_str), b(b_str), c(c_str);
-    return BICYCL::QFI(a, b, c);
-}
-
-// --------------------------------------------------
-// Sérialisation CipherText <-> ValueType
-// --------------------------------------------------
 void ciphertext_to_valuetype(const BICYCL::CL_HSMqk::CipherText& ct, ValueType& out)
 {
-    std::string combined = qfi_to_string(ct.c1()) + " | " + qfi_to_string(ct.c2());
+    std::vector<unsigned char> payload;
+    std::vector<unsigned char> c1_bytes = encode_qfi(ct.c1());
+    std::vector<unsigned char> c2_bytes = encode_qfi(ct.c2());
+    payload.insert(payload.end(), c1_bytes.begin(), c1_bytes.end());
+    payload.insert(payload.end(), c2_bytes.begin(), c2_bytes.end());
+
     std::fill(out.begin(), out.end(), ZeroBlock);
-    size_t copy_size = std::min(combined.size(), sizeof(ValueType));
-    std::memcpy(out.data(), combined.data(), copy_size);
+    std::uint32_t payload_len = static_cast<std::uint32_t>(payload.size());
+    const size_t header_size = sizeof(payload_len);
+    if (header_size + payload.size() > kMaxValueBytes) {
+        throw std::runtime_error("Serialized ciphertext is larger than the fixed ValueType capacity");
+    }
+
+    std::memcpy(out.data(), &payload_len, header_size);
+    std::memcpy(reinterpret_cast<unsigned char*>(out.data()) + header_size, payload.data(), payload.size());
 }
 
 BICYCL::CL_HSMqk::CipherText valuetype_to_ciphertext(
     const BICYCL::CL_HSMqk& crypto_system,
     const ValueType& vt)
 {
-    std::string str(reinterpret_cast<const char*>(vt.data()), sizeof(ValueType));
-    str.resize(strnlen(str.data(), sizeof(ValueType)));
+    const size_t bytes_capacity = sizeof(ValueType);
+    const unsigned char* raw = reinterpret_cast<const unsigned char*>(vt.data());
+    if (bytes_capacity < sizeof(std::uint32_t)) {
+        throw std::runtime_error("ValueType is too small for serialization");
+    }
 
-    size_t pos = str.find('|');
-    if (pos == std::string::npos)
-        throw std::runtime_error("Invalid ciphertext format");
+    std::uint32_t payload_len = 0;
+    std::memcpy(&payload_len, raw, sizeof(payload_len));
+    if (payload_len > bytes_capacity - sizeof(payload_len)) {
+        throw std::runtime_error("Serialized ciphertext is larger than the ValueType buffer");
+    }
 
-    std::string q1_str = str.substr(0, pos);
-    std::string q2_str = str.substr(pos + 1);
-
-    // Trim espaces
-    auto trim = [](std::string& s) {
-        s.erase(0, s.find_first_not_of(" \t"));
-        s.erase(s.find_last_not_of(" \t") + 1);
-    };
-    trim(q1_str); trim(q2_str);
-
-    return BICYCL::CL_HSMqk::CipherText(string_to_qfi(q1_str), string_to_qfi(q2_str));
+    std::vector<unsigned char> payload(raw + sizeof(payload_len), raw + sizeof(payload_len) + payload_len);
+    size_t offset = 0;
+    BICYCL::QFI c1 = decode_qfi(payload, offset);
+    BICYCL::QFI c2 = decode_qfi(payload, offset);
+    return BICYCL::CL_HSMqk::CipherText(c1, c2);
 }
 
 // --------------------------------------------------
@@ -190,13 +273,23 @@ int main()
 
         std::cout << "Paxos OKVS encoded successfully\n";
 
-        // 5. Décodage
+        // 5. Décodage (CORRECTION des correspondances de clés pour le test)
         std::vector<block>     clientSet1(m), clientSet2(m);
         std::vector<ValueType> decoded1(m),   decoded2(m);
 
-        clientSet1[0] = keys1[3];
+        // Cas indices 0 et 1 : Clés valides ET synchronisées (génèrent un succès)
+        clientSet1[0] = keys1[0]; 
         clientSet2[0] = keys2[0];
-        for (u64 i = 1; i < m; ++i) {
+        
+        clientSet1[1] = keys1[5]; 
+        clientSet2[1] = keys2[5];
+
+        // Cas indice 2 : Clés valides mais NON synchronisées entre Jeu 1 et Jeu 2 (génère un échec d'addition)
+        clientSet1[2] = keys1[10];
+        clientSet2[2] = keys2[15];
+
+        // Cas indices 3 et 4 : Clés complètement hors de l'OKVS (génèrent du bruit/exception gérée)
+        for (u64 i = 3; i < m; ++i) {
             clientSet1[i] = prng.get<block>();
             clientSet2[i] = prng.get<block>();
         }
@@ -213,12 +306,7 @@ int main()
         // 6. Reconstruction homomorphe et vérification
         for (u64 i = 0; i < m; ++i)
         {
-            // Si la clé était absente de l'OKVS, le décodé est tout zéro
-            if (is_zero_valuetype(decoded1[i]) || is_zero_valuetype(decoded2[i])) {
-                std::cout << "decode failed:  The server does not have the number value " << i << "\n";
-                continue;
-            }
-
+            bool found = false;
             try {
                 BICYCL::CL_HSMqk::CipherText c1 = valuetype_to_ciphertext(crypto_system, decoded1[i]);
                 BICYCL::CL_HSMqk::CipherText c2 = valuetype_to_ciphertext(crypto_system, decoded2[i]);
@@ -228,40 +316,20 @@ int main()
 
                 BICYCL::CL_HSMqk::ClearText decrypted_sum = crypto_system.decrypt(secret_key, c_sum);
 
-                BICYCL::Mpz zero;
-                zero = 0ul;
-                if (decrypted_sum == zero)
-                    std::cout << "decode successed: The server already has the number " << i << "\n";
-                else
-                    std::cout << "decode failed:  The server does not have the number value " << i << "\n";
-
-            } catch (const std::exception& e) {
-                std::cout << "decode failed:  The server does not have the number value " << i
-                          << " (" << e.what() << ")\n";
+                BICYCL::Mpz zero(0ul);
+                found = (decrypted_sum == zero);
+            } catch (const std::exception&) {
+                found = false;
             }
+
+            if (found)
+                std::cout << "decode successed:  The server already has the number " << i << "\n";
+            else
+                std::cout << "decode failed: The server does not have the number value " << i << "\n";
         }
 
-        std::cout << "decode success\n";
-
-        // 7. Affichage keys/vals (comme la version sans BICYCL)
-        std::cout << "================Keys1=================\n";
-        for (u64 i = 0; i < N; ++i)
-            std::cout << keys1[i] << " ";
-        std::cout << "\n";
-
-        std::cout << "================Vals1=================\n";
-        for (u64 i = 0; i < N; ++i)
-            std::cout << vals1[i] << "\n";
-
-        std::cout << "================Keys2=================\n";
-        for (u64 i = 0; i < N; ++i)
-            std::cout << keys2[i] << " ";
-        std::cout << "\n";
-
-        std::cout << "================Vals2=================\n";
-        for (u64 i = 0; i < N; ++i)
-            std::cout << vals2[i] << "\n";
-
+        std::cout << "decode success" << std::endl;
+        
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
