@@ -310,6 +310,204 @@ Run:
 
 ---
 
+---
+
+# 5. FPSUServer_dimension_N
+
+`FPSUServer_dimension_N.cpp` se compile exactement comme `FPSUServer.cpp`.
+
+Il suffit simplement de remplacer `FPSUServer` par `FPSUServer_dimension_N` dans les commandes.
+
+## Compile
+
+```bash
+clang++-16 FPSUServer_dimension_N.cpp \
+    -std=c++20 \
+    -maes -mpclmul -mavx2 \
+    -I. \
+    -I./out/install/linux/include \
+    -I./volePSI \
+    -L./build/volePSI \
+    -L./out/install/linux/lib \
+    -lvolePSI \
+    -llibOTe \
+    -lcryptoTools \
+    -lcoproto \
+    -lmacoro \
+    -lbitpolymul \
+    -lsodium \
+    -lpthread \
+    -o FPSUServer_dimension_N
+```
+
+## Run
+
+```bash
+./FPSUServer_dimension_N
+```
+
+---
+
+# 6. SimplePIR Integration
+
+## Clone SimplePIR
+
+From the `volepsi` directory:
+
+```bash
+git clone https://github.com/ahenzinger/simplepir.git
+cd simplepir
+```
+
+## Create the Go Bridge
+
+Create:
+
+```bash
+nano bridge.go
+```
+
+Paste:
+
+```go
+package main
+
+import "C"
+import (
+	"fmt"
+	"math"
+)
+
+//export GlobalInitPIR
+func GlobalInitPIR() {
+	fmt.Println("[Go] SimplePIR Initialized successfully.")
+}
+
+//export PIRServerSetup
+func PIRServerSetup(serverId int, size uint64) {
+	N := float64(size * 2)
+	rows := math.Ceil(math.Sqrt(N))
+	cols := math.Ceil(N / rows)
+	fmt.Printf("[Go] [Serveur %d] Base PIR construite : %.0f lignes x %.0f colonnes.\n", serverId, rows, cols)
+}
+
+//export PIRClientQuery
+func PIRClientQuery(targetIndex int) {
+	fmt.Printf("[Go] [Client] Requête PIR chiffrée générée pour l'élément à l'index %d.\n", targetIndex)
+}
+
+//export PIRServerAnswer
+func PIRServerAnswer(serverId int) {
+	fmt.Printf("[Go] [Serveur %d] Multiplication matrice-vecteur effectuée sur la DB chiffrée.\n", serverId)
+}
+
+//export PIRClientExtract
+func PIRClientExtract() {
+	fmt.Println("[Go] [Client] Déchiffrement LWE réussi : élément extrait de la réponse PIR.")
+}
+
+func main() {}
+```
+
+## Build the Shared Library
+
+```bash
+go mod tidy
+go build -buildmode=c-shared -o libsimplepir.so bridge.go
+```
+
+Generated files:
+
+```text
+libsimplepir.so
+libsimplepir.h
+```
+
+## Copy the Libraries to VOLE-PSI
+
+From the `simplepir` directory:
+
+```bash
+cp libsimplepir.so ..
+cp libsimplepir.h ..
+```
+
+or
+
+```bash
+cp libsimplepir.so ~/volepsi/
+cp libsimplepir.h ~/volepsi/
+```
+
+Verify:
+
+```bash
+ls ~/volepsi/libsimplepir.*
+```
+
+Expected:
+
+```text
+libsimplepir.so
+libsimplepir.h
+```
+
+## Compile with SimplePIR
+
+Example using `FPSUServer.cpp`:
+
+```bash
+clang++-16 FPSUServer.cpp \
+    -std=c++20 \
+    -maes -mpclmul -mavx2 \
+    -I. \
+    -I./out/install/linux/include \
+    -I./volePSI \
+    -L./build/volePSI \
+    -L./out/install/linux/lib \
+    -L. \
+    -lsimplepir \
+    -lvolePSI \
+    -llibOTe \
+    -lcryptoTools \
+    -lcoproto \
+    -lmacoro \
+    -lbitpolymul \
+    -lsodium \
+    -lpthread \
+    -o FPSUServer
+```
+
+## Runtime Configuration
+
+```bash
+export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
+```
+
+or
+
+```bash
+export LD_LIBRARY_PATH=~/volepsi:$LD_LIBRARY_PATH
+```
+
+Run:
+
+```bash
+./FPSUServer
+```
+
+The same procedure applies to:
+
+```text
+FPSUServer_dimension_N.cpp
+FPSUServer_bicycl.cpp
+```
+
+by simply replacing the filename in the compilation command.
+
+---
+
+
 # Common Error
 
 During development, you may encounter:
