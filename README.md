@@ -603,6 +603,19 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
 
 You can also place `libsimplepir.so` in a standard library directory or adjust the rpath during linking [web:17][web:18].
 
+### 6.8 Compile `FPSUServer_PIR`
+
+Then compile and link the demo with `volePSI` and `SimplePIR`:
+
+```bash
+clang++-16 FPSUServer_PIR.cpp -std=c++20 -maes -mpclmul -mavx2 -I. -I./out/install/linux/include -I./volePSI -I$HOME/bicycl/src -L./build/volePSI -L./out/install/linux/lib -o FPSUServer_PIR -Wl,--start-group -lvolePSI -llibOTe -lbitpolymul -lcoproto -lmacoro -lcryptoTools -Wl,--end-group -lsodium -lgmp -lgmpxx -lssl -lcrypto -lpthread -I. -L. -lsimplepir && ./FPSUServer_PIR
+```
+
+Then run:
+
+```bash
+./FPSUServer_PIR
+```
 
 # Common Error
 
