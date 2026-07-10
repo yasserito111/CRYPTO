@@ -621,7 +621,7 @@ Now we're using a function dedicated for the PIR:
 sparsedecode
 
 ```bash
-clang++-16 FPSUServer_p.cpp -std=c++20 -maes -mpclmul -mavx2 -I. -I./out/install/linux/include -I./volePSI -I$HOME/bicycl/src -L./build/volePSI -L./out/install/linux/lib -o FPSUServer_PIR -Wl,--start-group -lvolePSI -llibOTe -lbitpolymul -lcoproto -lmacoro -lcryptoTools -Wl,--end-group -lsodium -lgmp -lgmpxx -lssl -lcrypto -lpthread -I. -L. -lsimplepir && ./FPSUServer_p
+clang++-16 FPSUServer_p.cpp -std=c++20 -maes -mpclmul -mavx2 -I. -I./out/install/linux/include -I./volePSI -I$HOME/bicycl/src -L./build/volePSI -L./out/install/linux/lib -o FPSUServer_p -Wl,--start-group -lvolePSI -llibOTe -lbitpolymul -lcoproto -lmacoro -lcryptoTools -Wl,--end-group -lsodium -lgmp -lgmpxx -lssl -lcrypto -lpthread -I. -L. -lsimplepir && ./FPSUServer_p
 ```
 
 Then run:
