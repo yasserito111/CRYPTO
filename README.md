@@ -835,27 +835,6 @@ SI     -L./out/install/linux/lib     -lvolePSI     -llibOTe     -lcryptoTools   
 -lmacoro     -lbitpolymul     -lsodium     -lpthread     -o FPSUServer_pir_sparse.cpp
 ```
 
-## Build
-
-```bash
-python3 build.py -DVOLE_PSI_ENABLE_BOOST=ON
-```
-
-If the build fails, the most common cause is an outdated compiler.
-
-Check your compiler version:
-
-```bash
-g++ --version
-```
-
-A recent compiler (GCC ≥ 13) is recommended.
-
-Alternatively, install Clang 16:
-
-```bash
-sudo apt install clang-16
-```
 
 # Common Error
 
