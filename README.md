@@ -629,6 +629,234 @@ Then run:
 ```bash
 ./FPSUServer_PIR
 ```
+
+# 7. PIR integration
+
+## modify bridge.go
+
+```package main
+
+import "C"
+import (
+	"fmt"
+	"sync"
+	"unsafe"
+
+	"github.com/ahenzinger/simplepir/pir"
+)
+
+type serverRuntime struct {
+	id       int
+	db       *pir.Database
+	params   pir.Params
+	shared   pir.State
+	server   pir.State
+	offline  pir.Msg
+	answer   pir.Msg
+}
+
+var (
+	mu              sync.Mutex
+	servers         = make(map[int]*serverRuntime)
+	clientState     pir.State
+	clientShared    pir.State
+	clientQuery     pir.Msg
+	queryParams     pir.Params
+	queryIndex      uint64
+	server1Answer   pir.Msg
+	server2Answer   pir.Msg
+	lastRecovered   uint64
+)
+
+//export GlobalInitPIR
+func GlobalInitPIR() {
+	fmt.Println("[Go] SimplePIR Initialized successfully.")
+}
+
+func makeDatabase(size uint64) (*pir.Database, pir.Params) {
+	vals := make([]uint64, 0, size)
+	for i := uint64(0); i < size; i++ {
+		vals = append(vals, i+1)
+	}
+
+	return makeDatabaseFromValues(vals)
+}
+
+func makeDatabaseFromValues(vals []uint64) (*pir.Database, pir.Params) {
+	const rowLengthBits = uint64(24)
+	size := uint64(len(vals))
+	pi := &pir.SimplePIR{}
+	params := pi.PickParams(size, rowLengthBits, uint64(1<<10), 32)
+
+	db := pir.MakeDB(size, rowLengthBits, &params, vals)
+	return db, params
+}
+
+func installServer(serverId int, db *pir.Database, params pir.Params) {
+	pi := &pir.SimplePIR{}
+	shared := pi.Init(db.Info, params)
+	serverState, offline := pi.Setup(db, shared, params)
+
+	servers[serverId] = &serverRuntime{
+		id:      serverId,
+		db:      db,
+		params:  params,
+		shared:  shared,
+		server:  serverState,
+		offline: offline,
+	}
+}
+
+//export PIRServerSetup
+func PIRServerSetup(serverId int, size uint64) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if size == 0 {
+		size = 8
+	}
+
+	db, params := makeDatabase(size)
+	installServer(serverId, db, params)
+
+	fmt.Printf("[Go] [Serveur %d] Base PIR construite : %d entrées, params L=%d M=%d P=%d.\n", serverId, size, params.L, params.M, params.P)
+}
+
+//export PIRServerSetupU64
+func PIRServerSetupU64(serverId int, values *C.ulonglong, size C.ulonglong) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	n := uint64(size)
+	vals := make([]uint64, n)
+	if values != nil && n > 0 {
+		raw := unsafe.Slice(values, n)
+		for i := uint64(0); i < n; i++ {
+			vals[i] = uint64(raw[i])
+		}
+	}
+
+	db, params := makeDatabaseFromValues(vals)
+	installServer(serverId, db, params)
+
+	fmt.Printf("[Go] [Serveur %d] Base PIR U64 construite : %d entrées, params L=%d M=%d P=%d.\n", serverId, n, params.L, params.M, params.P)
+}
+
+//export PIRClientQuery
+func PIRClientQuery(targetIndex int) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s1, ok := servers[1]
+	if !ok {
+		fmt.Println("[Go] [Client] Aucun serveur initialisé pour générer la requête.")
+		return
+	}
+
+	pi := &pir.SimplePIR{}
+	clientStateLocal, query := pi.Query(uint64(targetIndex), s1.shared, s1.params, s1.db.Info)
+	clientState = clientStateLocal
+	clientShared = s1.shared
+	clientQuery = query
+	queryParams = s1.params
+	queryIndex = uint64(targetIndex)
+
+	fmt.Printf("[Go] [Client] Requête PIR générée pour l'élément à l'index %d.\n", targetIndex)
+}
+
+//export PIRServerAnswer
+func PIRServerAnswer(serverId int) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s, ok := servers[serverId]
+	if !ok {
+		fmt.Printf("[Go] [Serveur %d] non initialisé.\n", serverId)
+		return
+	}
+	if len(clientQuery.Data) == 0 {
+		fmt.Println("[Go] [Serveur] Aucune requête client disponible.")
+		return
+	}
+
+	pi := &pir.SimplePIR{}
+	querySlice := pir.MsgSlice{Data: []pir.Msg{clientQuery}}
+	answer := pi.Answer(s.db, querySlice, s.server, s.shared, s.params)
+
+	if serverId == 1 {
+		server1Answer = answer
+	} else if serverId == 2 {
+		server2Answer = answer
+	}
+
+	fmt.Printf("[Go] [Serveur %d] Réponse PIR calculée pour la requête.\n", serverId)
+}
+
+//export PIRClientExtract
+func PIRClientExtract() {
+	recovered := PIRClientExtractValue()
+	fmt.Printf("[Go] [Client] Valeur extraite : %d.\n", recovered)
+}
+
+//export PIRClientExtractValue
+func PIRClientExtractValue() uint64 {
+	mu.Lock()
+	defer mu.Unlock()
+
+	s1, ok := servers[1]
+	if !ok {
+		fmt.Println("[Go] [Client] Impossible de reconstruire sans serveur 1.")
+		return 0
+	}
+	if len(server1Answer.Data) == 0 {
+		fmt.Println("[Go] [Client] Aucune réponse serveur disponible pour la reconstruction.")
+		return 0
+	}
+
+	pi := &pir.SimplePIR{}
+	recovered := pi.Recover(queryIndex, 0, s1.offline, clientQuery, server1Answer, clientShared, clientState, queryParams, s1.db.Info)
+	lastRecovered = recovered
+
+	return recovered
+}
+
+func main() {}
+
+```
+then run the files without and with PIR
+```bash
+clang++-16 FPSUServer_p.cpp     -std=c++20     -maes -mpclmul -mavx2     -I.     -I./out/install/linux/include     -I./volePSI     -L./build/volePSI     -L./out/install/linux/lib     -lvolePSI     -llibOTe     -lcryptoTools     -lcoproto     -lmacoro     -lbitpolymul     -lsodium     -lpthread     -o FPSUServer_p
+```
+then decode1 with PIR 
+```bash
+clang++-16 FPSUServer_pir_sparse.cpp     -std=c++20     -ma
+es -mpclmul -mavx2     -I.     -I./out/install/linux/include     -I./volePSI     -L./build/voleP
+SI     -L./out/install/linux/lib     -lvolePSI     -llibOTe     -lcryptoTools     -lcoproto     
+-lmacoro     -lbitpolymul     -lsodium     -lpthread     -o FPSUServer_pir_sparse.cpp
+```
+
+## Build
+
+```bash
+python3 build.py -DVOLE_PSI_ENABLE_BOOST=ON
+```
+
+If the build fails, the most common cause is an outdated compiler.
+
+Check your compiler version:
+
+```bash
+g++ --version
+```
+
+A recent compiler (GCC ≥ 13) is recommended.
+
+Alternatively, install Clang 16:
+
+```bash
+sudo apt install clang-16
+```
+
 # Common Error
 
 During development, you may encounter:
